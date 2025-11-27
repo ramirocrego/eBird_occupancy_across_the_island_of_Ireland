@@ -1,0 +1,98 @@
+# Processing eBird datasets
+
+# The repository does not have the ebird data but the code should work with data downloaded from eBird. 
+
+```{r}
+# Laod libraries
+library(auk)
+library(tidyverse)
+library(sf)
+
+# Set EBD_PATH environment variable
+
+auk::auk_set_ebd_path(getwd(), overwrite = T)
+
+# The data we used was downloaded from eBird: eBird Basic Dataset. 2024. Version: EBD_relJun-2024. Cornell Lab of Ornithology, Ithaca, New York.
+
+# Read and filter Republic of Ireland data
+ebd <- auk_ebd(file = "./ebd_IE_200001_202401_smp_relJun-2024/ebd_IE_200001_202401_smp_relJun-2024.txt", file_sampling = "./ebd_IE_200001_202401_smp_relJun-2024/ebd_IE_200001_202401_smp_relJun-2024_sampling.txt") %>% auk_complete() %>% # Keep only complete checklists to facilitate zero-filling
+  auk_distance(distance = c(0, 10)) %>% # Keep only checklists 0 (stationary) to 10km long
+  auk_duration(duration = c(0, 360)) %>% # Keep only checklists up to 6hr long to remove non-relevant data
+  auk_protocol(protocol = c("Stationary", "Traveling")) %>%  # Keep standard protocols
+  auk_filter(file = "IE_ebd.txt",
+             file_sampling = "IE_sed.txt",
+             filter_sampling = TRUE,
+             overwrite = TRUE)
+
+ebd <- read_ebd("IE_ebd.txt", rollup = T, unique = T)
+sed <- read_sampling("IE_sed.txt", unique = T)
+
+# Fill zeros
+zf <- auk_zerofill(ebd, sed, collapse = TRUE)
+
+# Read and filter Northern Ireland data
+ebd2 <- auk_ebd(file = "./ebd_GB-NIR_200001_202401_smp_relJun-2024/ebd_GB-NIR_200001_202401_smp_relJun-2024.txt", file_sampling = "./ebd_GB-NIR_200001_202401_smp_relJun-2024/ebd_GB-NIR_200001_202401_smp_relJun-2024_sampling.txt") %>% auk_complete() %>% # Keep only complete checklists to facilitate zero-filling
+  auk_distance(distance = c(0, 10)) %>% # Keep only checklists 0 (stationary) to 10km long
+  auk_duration(duration = c(0, 360)) %>% # Keep only checklists up to 6hr long to remove non-relevant data
+  auk_protocol(protocol = c("Stationary", "Traveling")) %>%  # Keep standard protocols
+  auk_filter(file = "NIR_ebd.txt",
+             file_sampling = "NIR_sed.txt",
+             filter_sampling = TRUE,
+             overwrite = TRUE)
+
+ebd2 <- read_ebd("NIR_ebd.txt", rollup = T, unique = T)
+sed2 <- read_sampling("NIR_sed.txt", unique = T)
+
+zf2 <- auk_zerofill(ebd2, sed2, collapse = TRUE)
+
+# Function to convert time observation to time since midnight
+time_to_decimal <- function(x) {
+  x <- hms(x, quiet = TRUE)
+  hour(x) + minute(x) / 60 + second(x) / 3600
+}
+
+# Clean up variables
+zf <- zf %>% 
+  mutate(
+    # Convert X to NA
+    observation_count = if_else(observation_count == "X", 
+                                NA_character_, observation_count),
+    observation_count = as.integer(observation_count),
+    # Effort_distance_km to 0 for non-travelling counts
+    effort_distance_km = if_else(protocol_type != "Traveling", 
+                                 0, effort_distance_km),
+    # Convert duration to hours
+    effort_min = duration_minutes,
+    # Ccnvert time to decimal hours since midnight
+    hours_of_day = time_to_decimal(time_observations_started),
+    # Year
+    year = year(observation_date)
+  )
+
+zf2 <- zf2 %>% 
+  mutate(
+    # convert X to NA
+    observation_count = if_else(observation_count == "X", 
+                                NA_character_, observation_count),
+    observation_count = as.integer(observation_count),
+    # effort_distance_km to 0 for non-travelling counts
+    effort_distance_km = if_else(protocol_type != "Traveling", 
+                                 0, effort_distance_km),
+    # Convert duration to hours
+    effort_min = duration_minutes,
+    # Convert time to decimal hours since midnight
+    hours_of_day = time_to_decimal(time_observations_started),
+    # Year
+    year = year(observation_date)
+  )
+
+zf_filtered <- zf |> select(checklist_id, country, county, latitude, longitude, observation_date, time_observations_started, observer_id, protocol_type, effort_min, effort_distance_km,  number_observers, scientific_name, observation_count, species_observed, hours_of_day, year) |> filter(year <= 2023)
+zf_filtered2 <- zf2 |> select(checklist_id, country, county, latitude, longitude, observation_date, time_observations_started, observer_id, protocol_type, effort_min, effort_distance_km,  number_observers, scientific_name, observation_count, species_observed, hours_of_day, year) |> filter(year <= 2023)
+
+# Merge the two datasets
+zf_filtered <- rbind(zf_filtered, zf_filtered2)
+
+# Save the data
+save(zf_filtered, file = "./Data/filtered_data.RData")
+```
+

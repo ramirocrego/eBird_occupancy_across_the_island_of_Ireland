@@ -1,0 +1,391 @@
+# Prepare data for occupancy modelling
+
+```{r, message=FALSE, warning=FALSE}
+# Laod libraries
+library(tidyverse)
+library(sf)
+library(terra)
+library(tmap)
+library(stringr)
+library(lubridate)
+library(auk)
+library(tidyverse)
+library(FNN)
+```
+
+```{r, message=FALSE, warning=FALSE}
+load("./Data/filtered_data.RData")
+
+zf_filtered <- zf_filtered %>% select(c(checklist_id, county, latitude, longitude, observation_date, time_observations_started, observer_id, protocol_type, effort_distance_km, number_observers, scientific_name, observation_count, effort_min, hours_of_day, day_of_year, year))
+
+names(zf_filtered) = c("Checklists ID","County","Latitude","Longitude","Observation Date","Time Observations Started","Observer ID","Protocol Type","Effort Distance (km)","Number Observers","Scientific Name","Observation Count","Effort Min","Hours of Day","Day of Year","Year")
+zf_filtered <- zf_filtered %>%
+  mutate(Month = month(`Observation Date`, label=TRUE, abbr=FALSE, locale = "en"))
+zf_filtered$Year <- as.integer(zf_filtered$Year)
+Centroids <- st_read("./Data/Centroids.shp")
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+# Set filters
+YearMin <- 2018
+YearMax <- 2023
+MonthMin <- 4
+MonthMax <- 6
+EffortDistMin <- 0
+EffortDistMax <- 1
+HoursDayMin <- 5
+HoursDayMax <- 21
+EffortMinsMin <- 5
+EffortMinsMax <- 60
+NrObserversMin <- 0
+NrObserversMax <- 2
+
+# Filter data
+dataoccfilt <- zf_filtered %>% 
+  filter(Year >= YearMin & Year <= YearMax, Month %in% month.name[MonthMin:MonthMax], `Effort Distance (km)` >= EffortDistMin & `Effort Distance (km)` <= EffortDistMax, `Hours of Day` >= HoursDayMin & `Hours of Day` <= HoursDayMax, `Effort Min` >= EffortMinsMin & `Effort Min` <= EffortMinsMax, `Number Observers` >= NrObserversMin  & `Number Observers` <= NrObserversMax)
+
+# Transform into sf
+sf_data <- st_as_sf(dataoccfilt, coords = c("Longitude", "Latitude"), crs = 4326)
+sf_data <- st_transform(sf_data, 32629)
+
+# Calculate distance between each point and each centroid and save Cell ID. This will be used later to keep only lists within a certain distance from the center of the cell.
+nearneigh <- st_nearest_feature(sf_data, Centroids)
+dist2Cen <- st_distance(sf_data, Centroids[nearneigh,], by_element = TRUE)
+sf_data$CellID <- nearneigh
+sf_data$dist2Cen <- as.numeric(dist2Cen)
+
+# Filter species of interest
+# Full species list
+species_full <- read.csv("./Data/sp_prev.csv")
+species_full
+
+sf_data <- sf_data %>% filter(`Scientific Name` %in% unique(species_full$Scientific.Name))
+
+# Load covariates
+load("./Data/enviro_variables.RData")
+env_variables$CellID <- env_variables$ID
+
+# Join the data
+Obs_cell <- left_join(sf_data, env_variables, by = "CellID")
+summary(Obs_cell)
+names(Obs_cell)
+```
+
+# Calculate wind speed from ERA5 dataset
+
+```{r, message=FALSE, warning=FALSE}
+# Keep individual checklists to extract wind speed
+checklists <- Obs_cell |> slice_head(by = "Checklists ID", n = 1)
+checklists <- checklists[,1:4]
+
+# Add wind information from ERAS5 
+# Initialize rgee
+library(rgee)
+ee_Initialize()
+ee_check()
+
+# Set time
+checklists$Time <- checklists$`Observation Date`
+checklists$DateTime <- as.POSIXct(paste0(checklists$Time, " ", checklists$`Time Observations Started`), format = "%Y-%m-%d %H:%M", tz = "Europe/Dublin")
+checklists$DateTimeUTC <- with_tz(checklists$DateTime, "UTC")
+checklists$Date <- as.factor(checklists$DateTimeUTC)
+checklists$Date <- sub(" ", "T", checklists$Date) #Put in a format that can be read by javascript
+
+#Setting the GEE functions
+#Function to add property with time in milliseconds
+add_date<-function(feature) {
+  date <- ee$Date(ee$String(feature$get("Date")))$millis()
+  feature$set(list(date_millis=date))
+}
+
+#Set temporal window in days for filter. This will depend on the remote sensing data used.
+tempwin <- 0.5
+
+#Set the filter
+maxDiffFilter <- ee$Filter$maxDifference(
+  difference=tempwin*24*60*60*1000, #days * hr * min * sec * milliseconds
+  leftField= "date_millis", #Timestamp of the telemetry data
+  rightField="system:time_start" #Image date
+)
+
+# Define the join.
+saveBestJoin<-ee$Join$saveBest(
+  matchKey="bestImage",
+  measureKey="timeDiff"
+)
+
+#Function to add property with raster pixel value from the matched image
+add_value<-function(feature){
+  #Get the image selected by the join
+  img1<-ee$Image(feature$get("bestImage"))$select({band})
+  #Extract geometry from the feature
+  point<-feature$geometry()
+  #Get pixel value for each point at the desired spatial resolution (argument scale)
+  pixel_value<-img1$sample(region=point, scale=250, tileScale = 16, dropNulls = F) 
+  #Return the data containing pixel value and image date.
+  feature$setMulti(list(u = pixel_value$first()$get(band[1]),
+                        v = pixel_value$first()$get(band[2]),
+                        #temp2m = pixel_value$first()$get(band[3]),
+                        DateTimeImage = img1$get('system:index')))
+}
+
+# Function to remove image property from features
+removeProperty<- function(feature) {
+  #Get the properties of the data
+  properties = feature$propertyNames()
+  #Select all items except images
+  selectProperties = properties$filter(ee$Filter$neq("item", "bestImage"))
+  #Return selected features
+  feature$select(selectProperties)
+}
+
+
+# Load hourly climatic data
+rangedates <- range(as.Date(checklists$`Observation Date`))
+rangedates[1]-1
+start<-"2018-03-31"
+rangedates[2]+1
+end<-"2023-07-01"
+
+# Load hourly climatic data
+imagecoll<-ee$ImageCollection('ECMWF/ERA5_LAND/HOURLY')$filterDate(start,end)
+band <- c('u_component_of_wind_10m', 'v_component_of_wind_10m')
+
+# Extract raster value
+xsf <- checklists %>% select(`Checklists ID`, Date) 
+xsf <- xsf %>% slice_head(by = `Checklists ID`, n = 1)
+
+xsf$seq <- seq(1, nrow(xsf), by = 1)
+xsf <- xsf %>% arrange(Date)
+xsf$uniq <- rep(1:100, each=100)[1:nrow(xsf)]
+xsf
+
+dataoutput <- data.frame()
+for(x in unique(xsf$uniq)){
+  data1 <- xsf %>% filter(uniq == x)
+  # Send sf to GEE
+  data <- sf_as_ee(data1)
+  # Transform day into milliseconds
+  data<-data$map(add_date)
+  # Apply the join.
+  Data_match<-saveBestJoin$apply(data, imagecoll, maxDiffFilter)
+  #Add value to the data
+  DataFinal<-Data_match$map(add_value)
+  #Remove image property from the data
+  DataFinal<-DataFinal$map(removeProperty)
+  # Transform GEE object in sf
+  temp<- ee_as_sf(DataFinal)
+  # append
+  dataoutput <- rbind(dataoutput, temp)
+}
+dataoutput
+summary(dataoutput)
+
+dataoutput <- dataoutput %>% arrange(seq)
+dataoutput$windspeed <-  sqrt(dataoutput$u*dataoutput$u + dataoutput$v*dataoutput$v) # wind speed
+wind <- dataoutput %>% select(Checklists.ID, windspeed) %>% st_drop_geometry()
+Obs_cell2 <- left_join(Obs_cell, wind, by = c("Checklists ID" = "Checklists.ID")) 
+range(Obs_cell2$windspeed, na.rm = T)
+sf_data <- Obs_cell2
+```
+
+```{r, echo = F}
+load("./Data/sf_data.RData")
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Species list
+species_full <- read.csv("./Data/sp_prev.csv")
+speciesnamesfull <- species_full$Scientific.Name
+
+# Delete checklists with NAs in observation count
+naobs <- sf_data |> filter(is.na(`Observation Count`))
+nachecklists <- unique(naobs$`Checklists ID`)
+sf_data <- sf_data |> filter(!`Checklists ID` %in% nachecklists)
+
+# Conver abundance to 0 and 1s.
+sf_data$`Observation Count` <- ifelse(sf_data$`Observation Count` > 0, 1, 0)
+
+# Fill NA of windspeed with data from near neighbor at each day
+sf_data$SeqID <- seq(1:nrow(sf_data))
+dates <- unique(sf_data$`Observation Date`)
+out <- data.frame()
+for(y in 1:length(dates)){
+  temp <- sf_data |> filter(`Observation Date` == dates[y])
+  coords <- st_coordinates(temp)
+  tempdf <- cbind(temp, coords) |> st_drop_geometry()
+  query = tempdf[is.na(tempdf$windspeed),]
+  windvalues = tempdf[!is.na(tempdf$windspeed),]
+  if(nrow(query) == 0) {
+    out <- rbind(out,tempdf)
+  } else { 
+    if(nrow(windvalues) == 0){
+      out <- rbind(out,tempdf)
+    }
+    else{
+      neighs = get.knnx(windvalues[,c("X","Y")],query[,c("X","Y")],k=1)
+      tempdf[is.na(tempdf$windspeed),"windspeed"] = windvalues$windspeed[neighs$nn.index]
+      out <- rbind(out,tempdf)
+    }
+  }
+}
+out <- arrange(out, SeqID)
+sf_data$windspeed <- out$windspeed
+
+# Remove data with env variables NAs
+sf_data <- sf_data |> filter(!is.na(HMI))
+
+# Keep only point within 300 m from the centroid
+sf_data <- sf_data %>% filter(dist2Cen <= 300)
+
+# Keep only years 2018,2019,2022, and 2023
+sf_data <- sf_data %>% filter(Year %in% c(2018,2019,2022,2023))
+
+# Check distribution of transect length
+hist(sf_data$`Effort Distance (km)`)
+```
+
+# Estimate the Obsrever Expertise Index
+
+```{r, message=FALSE, warning=FALSE}
+library(nimble)
+library(coda)
+library(mcmcOutput)
+library(MCMCvis)
+
+# Arrange data for modelling
+ObsExp <- sf_data |> group_by(`Observer ID`, `Checklists ID`) |> summarise(n = sum(`Observation Count`), Year = first(Year), `Effort Distance (km)` = first(`Effort Distance (km)`), `Hours of Day` = first(`Hours of Day`), `Effort Min` = first(`Effort Min`), windspeed = first(windspeed), HMI = first(HMI))
+
+#Standarize covariables
+HoursofDayS = scale(ObsExp$`Hours of Day`)
+HoursofDay2S = scale(ObsExp$`Hours of Day` * ObsExp$`Hours of Day`)
+EffortMinS = scale(ObsExp$`Effort Min`)
+EffortDistS = scale(ObsExp$`Effort Distance (km)`) 
+windspeedS = scale(ObsExp$windspeed)
+windspeedS[is.na(windspeedS)] <- 0 #Fill NA with mean value
+HMIS = scale(ObsExp$HMI)
+HMIS[is.na(HMIS)] <- 0 #Fill NA with mean value
+
+# Set constants and indicators
+n <- nrow(ObsExp)
+ob <- as.numeric(as.factor(ObsExp$`Observer ID`)) ## Indicator for Observer ID
+nobser <- length(unique(ob))
+
+# Model
+PoissonMod <- nimbleCode({
+  mu_a0 ~ dnorm(0, 0.01)
+  sig_a0 ~ dunif(0, 10)     #SD
+  tau_a0 <- pow(sig_a0, -2) #Precision
+  
+  # Priors
+  for(i in 1:nobser){
+    alpha0[i] ~ dnorm(mu_a0, tau_a0)
+  }
+  alpha1 ~ dnorm(0, 0.01)
+  alpha2 ~ dnorm(0, 0.01)
+  alpha3 ~ dnorm(0, 0.01)
+  alpha4 ~ dnorm(0, 0.01)
+  alpha5 ~ dnorm(0, 0.01)
+  
+  r ~ dunif(0,50)
+  
+  # Likelihood
+  for(i in 1:n){
+    C[i] ~ dnegbin(p[i],r)
+    p[i] <- r/(r+lambda[i])
+    
+    log(lambda[i]) <- alpha0[ob[i]] + alpha1 * HoursofDay[i] + alpha2 * HoursofDay2[i] + alpha3 * EffortMin[i] + alpha4 * HMI[i] + alpha5 * wind[i]
+    
+    # Fit assessments
+    varY[i] <- lambda[i] + pow(lambda[i],2)/r
+    Presi[i] <- (C[i] - lambda[i]) / sqrt(varY[i]) # Pearson residuals
+    C.new[i] ~ dnegbin(p[i],r)		# Replicate data set
+    Presi.new[i] <- (C.new[i] - lambda[i]) / sqrt(varY[i]) # Pearson resi
+    D[i] <- pow(Presi[i], 2)
+    D.new[i] <- pow(Presi.new[i], 2)
+  }
+  
+  # Add up discrepancy measures
+  fit <- sum(D[1:n])
+  fit.new <- sum(D.new[1:n])
+})  
+
+# Bundle and summarize the data set
+Data <- list(C = ObsExp$n, HoursofDay = as.numeric(HoursofDayS), HoursofDay2 = as.numeric(HoursofDay2S), EffortMin = as.numeric(EffortMinS), wind = as.numeric(windspeedS), HMI = as.numeric(HMIS))
+Consts <- list(n = n, ob = ob, nobser = nobser)
+
+# Inits function
+Inits <- list(mu_a0 = rnorm(1), alpha1 = rnorm(1), alpha2 = rnorm(1), alpha3 = rnorm(1), alpha4 = rnorm(1), alpha5 = rnorm(1), r = runif(1,1,50))
+
+# Parameters to estimate
+params <- c("mu_a0","sig_a0","alpha0","alpha1","alpha2","alpha3","alpha4","alpha5","fit", "fit.new")
+
+## Paralell running (for laptop) ----
+
+library(parallel)
+
+this_cluster <- makeCluster(3)
+
+# Create a function with all the needed code
+
+run_MCMC_allcode <- function(Seed, Data, Code, Const, Inits, Params) {
+  library(nimble)
+  library(coda)
+  myModel <- nimbleModel(code = Code,
+                         constants = Const, data = Data, inits = Inits,
+                         calculate = FALSE)
+  
+  CmyModel <- compileNimble(myModel)
+  Modolconf <- configureMCMC(myModel, monitors = Params)
+  myMCMC <- buildMCMC(Modolconf)
+  CmyMCMC <- compileNimble(myMCMC)
+  
+  results <- runMCMC(CmyMCMC,
+                     nburnin = 20000,
+                     niter = 60000,
+                     thin = 40,
+                     samples = TRUE,
+                     samplesAsCodaMCMC = T,
+                     summary = F,
+                     WAIC = FALSE,
+                     perChainWAIC = FALSE,
+                     setSeed = Seed)
+  results <- as.mcmc(results)
+  return(results)
+}
+
+chain_output <- parLapply(cl = this_cluster, X = 1:3,
+                          fun = run_MCMC_allcode,
+                          Data = Data, Code = PoissonMod,
+                          Const = Consts, Inits = Inits, Params = params)
+
+# It's good practice to close the cluster when you're done with it.
+stopCluster(this_cluster)
+
+# Look at the traceplots
+out <- mcmcOutput(mcmc.list(chain_output))
+View(summary(out, n.eff=TRUE))
+diagPlot(out)
+
+mean(out[,'fit'] > out[,'fit.new']) # 0.87
+plot(out[,'fit'] ~ out[,'fit.new'])
+
+# Extract intercepts
+alpha0_rowsP <- grepl(colnames(out), pattern = "^alpha0\\[")
+alpha0P <- out[,alpha0_rowsP]
+Exp <- (exp(apply(alpha0P, 2, mean)))
+# Estimate OEI 
+ExpIndex <- Exp/max(Exp) 
+range(ExpIndex)     
+hist(ExpIndex)
+
+# Save as data frame
+ObsExIndex <- data.frame(ObserverID = unique(ObsExp$`Observer ID`), ExpIndex = ExpIndex)
+names(ObsExIndex) <- c("Observer ID", "ExpIndex")
+
+# Join observer experience index to the data
+sf_data <- left_join(sf_data, ObsExIndex, by = "Observer ID")
+summary(sf_data)
+```
+

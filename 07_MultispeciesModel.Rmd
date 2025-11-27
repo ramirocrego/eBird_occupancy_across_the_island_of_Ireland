@@ -1,0 +1,900 @@
+```{r, message=FALSE, warning=FALSE}
+# Single species occupancy model
+
+# Load libraries
+library(nimble)
+library(coda)
+library(mcmcOutput)
+library(MCMCvis)
+library(tidyverse)
+library(reshape)
+library(bayestestR)
+library(pals) # color palette
+
+# Clear environment
+rm(list = ls())
+
+# Load data
+load("./Data/occ_data14sp.RData")
+Years <- year(as.Date(unique(as.factor(years)), "%Y"))
+```
+
+# Occupancy buds model 
+
+```{r, message=FALSE, warning=FALSE}
+occmod <- nimbleCode({
+  # Priors
+  #Alpha0
+  mu_a0 <- logit(mean_a0)
+  mean_a0 ~ dunif(0,1)
+  sig_a0 ~ dunif(0, 10)      #SD
+  tau_a0 <- pow(sig_a0, -2)    #Precision
+  
+  #Alpha1
+  mu_a1 ~ dnorm(0, 0.01)        #Mean
+  sig_a1 ~ dunif(0, 10)      #SD
+  tau_a1 <- pow(sig_a1, -2)    #Precision
+  
+  #Alpha2
+  mu_a2 ~ dnorm(0, 0.01)        #Mean
+  sig_a2 ~ dunif(0, 10)      #SD
+  tau_a2 <- pow(sig_a2, -2)    #Precision
+  
+  #Alpha3
+  mu_a3 ~ dnorm(0, 0.01)        #Mean
+  sig_a3 ~ dunif(0, 10)      #SD
+  tau_a3 <- pow(sig_a3, -2)    #Precision
+
+  #Alpha4
+  mu_a4 ~ dnorm(0, 0.01)        #Mean
+  sig_a4 ~ dunif(0, 10)      #SD
+  tau_a4 <- pow(sig_a4, -2)    #Precision
+  
+  #Beta0
+  mu_b0 <- logit(mean_b0)
+  mean_b0 ~ dunif(0,1)
+  sig_b0 ~ dunif(0, 5)      #SD
+  tau_b0 <- pow(sig_b0, -2)    #Precision
+  
+  #Beta1
+  mu_b1 ~ dnorm(0, 0.01)        #Mean
+  sig_b1 ~ dunif(0, 10)      #SD
+  tau_b1 <- pow(sig_b1, -2)    #Precision
+  
+  #Beta2
+  mu_b2 ~ dnorm(0, 0.01)        #Mean
+  sig_b2 ~ dunif(0, 10)      #SD
+  tau_b2 <- pow(sig_b2, -2)    #Precision
+  
+  #Beta3
+  mu_b3 ~ dnorm(0, 0.01)        #Mean
+  sig_b3 ~ dunif(0, 10)      #SD
+  tau_b3 <- pow(sig_b3, -2)    #Precision
+  
+  #Beta4
+  mu_b4 ~ dnorm(0, 0.01)        #Mean
+  sig_b4 ~ dunif(0, 10)      #SD
+  tau_b4 <- pow(sig_b4, -2)    #Precision
+  
+  #Beta5
+  mu_b5 ~ dnorm(0, 0.01)        #Mean
+  sig_b5 ~ dunif(0, 10)      #SD
+  tau_b5 <- pow(sig_b5, -2)    #Precision
+  
+  #Beta6
+  mu_b6 ~ dnorm(0, 0.01)        #Mean
+  sig_b6 ~ dunif(0, 10)      #SD
+  tau_b6 <- pow(sig_b6, -2)    #Precision
+  
+  for(s in 1:nspec){
+  
+    #Random factor for year on occupancy
+    mu_alpha0[s] ~ dnorm(mu_a0, tau_a0)    #Intercept parameter
+    sig_alpha0[s] ~ dunif(0, 10)      #SD
+    tau_alpha0[s] <- pow(sig_alpha0[s], -2)    #Precision
+    
+    for (t in 1:nyears) {
+      alpha0[t,s] ~ dnorm(mu_alpha0[s], tau_alpha0[s])
+    }
+    
+    # Occupancy covariables
+    alpha1[s] ~ dnorm(mu_a1, tau_a1)    #Effect parameter 
+    alpha2[s] ~ dnorm(mu_a2, tau_a2)    #Effect parameter 
+    alpha3[s] ~ dnorm(mu_a3, tau_a3)    #Effect parameter 
+    alpha4[s] ~ dnorm(mu_a4, tau_a4)    #Effect parameter 
+    
+    #Random factor for year on detectability
+    mu_beta0[s] ~ dnorm(mu_b0, tau_b0)     #Intercept parameter
+    sig_beta0[s] ~ dunif(0, 10)      #SD
+    tau_beta0[s] <- pow(sig_beta0[s], -2)    #Precision
+    
+    for (t in 1:nyears) {
+      beta0[t,s] ~ dnorm(mu_beta0[s], tau_beta0[s])
+    }
+  
+    # Detection prob covariables
+    beta1[s] ~ dnorm(mu_b1, tau_b1)    #Effect parameter 
+    beta2[s] ~ dnorm(mu_b2, tau_b2)    #Effect parameter 
+    beta3[s] ~ dnorm(mu_b3, tau_b3)    #Effect parameter 
+    beta4[s] ~ dnorm(mu_b4, tau_b4)    #Effect parameter 
+    beta5[s] ~ dnorm(mu_b5, tau_b5)    #Effect parameter 
+    beta6[s] ~ dnorm(mu_b6, tau_b6)    #Effect parameter 
+
+    #Random effect on site
+    for(t in 1:nyears){
+      sd_lam[t,s] ~ dunif(0, 2)      
+      tau_lam[t,s] <- pow(sd_lam[t,s], -2)    
+      for(i in 1:nsites){
+        eps_lam[i,t,s] ~ dnorm(0, tau_lam[t,s]) #Random effect on site with different variance every year per species
+      }
+    }
+    
+      # Likelihood
+      for(t in 1:nyears){  
+        for (i in 1:nsites) { 
+          # True state model for the partially observed true state
+          z[i,t,s] ~ dbern(psi[i,t,s])		# True occupancy z at site i
+          logit(psi[i,t,s]) <- lpsi.lim[i,t,s]
+          lpsi.lim[i,t,s] <- min(250, max(-250, lpsi[i,t,s])) # 'Stabilize' logit
+          lpsi[i,t,s] <- alpha0[t,s] + alpha1[s] * Elev[i] + alpha2[s] * WVC[i] + alpha3[s] * HMI[i] + alpha4[s] * Agri[i] + eps_lam[i,t,s]
+          
+          for (j in 1:nvisists[i,t]) { 
+            # Observation model for the actual observations
+            y[i,j,t,s] ~ dbern(p.eff[i,j,t,s])	# Detection-nondetection at i, j and t
+            p.eff[i,j,t,s] <- z[i,t,s] * p[i,j,t,s]
+            logit(p[i,j,t,s]) <- beta0[t,s] + beta1[s] * WindSpeed[i,j,t] + beta2[s] * HoursofDay[i,j,t] + beta3[s] * HoursofDay2[i,j,t] + beta4[s] * HMI [i] + beta5[s] * EffortMin[i,j,t] + beta6[s] * OEI[i,j,t] 
+          }#j reps
+          
+          # Calculate psi residuals
+          res[i,t,s]<-psi[i,t,s]-z[i,t,s]
+          
+        }# i sited
+      }#t years
+  }#s species
+  
+  for(s in 1:nspec){
+    for(t in 1:nyears){
+      # PAO
+      n.occ[t,s] <- sum(z[1:nsites,t,s])/nsites
+    }#end t loop
+  }#end s loop
+  
+})
+
+# Create some constants, data, and initial values to pass to the model builder
+Consts <- list(nspec = nspecies, nsites = nsites, nyears=nyears, nvisists = nvisists)
+
+Data <- list(y = Y,
+             EffortMin = EffortMinSc,
+             HoursofDay = HoursofDaySc,
+             HoursofDay2 = HoursofDaySc*HoursofDaySc,
+             WindSpeed = WindSpeedSc,
+             OEI = OEISc,
+             Elev = EleSc,
+             HMI = HMISc,
+             WVC = WoodVegCovSc,
+             Agri = AgrSc
+)
+
+zst <- array(1,c(nsites,nyears,nspecies))
+Inits <- list(
+  z = zst, 
+  mean_a0 = runif(1, 0, 1),
+  mu_a1 = rnorm(1, 0, 1),
+  mu_a2 = rnorm(1, 0, 1),
+  mu_a3 = rnorm(1, 0, 1),
+  mu_a4 = rnorm(1, 0, 1),
+  mean_b0 = runif(1, 0, 1),
+  mu_b1 = rnorm(1, 0, 1),
+  mu_b2 = rnorm(1, 0, 1),
+  mu_b3 = rnorm(1, 0, 1),
+  mu_b4 = rnorm(1, 0, 1),
+  mu_b5 = rnorm(1, 0, 1),
+  mu_b6 = rnorm(1, 0, 1),
+  sig_a0 = runif(1, 0, 1),
+  sig_a1 = runif(1, 0, 1),
+  sig_a2 = runif(1, 0, 1),
+  sig_a3 = runif(1, 0, 1),
+  sig_a4 = runif(1, 0, 1),
+  sig_b0 = runif(1, 0, 1),
+  sig_b1 = runif(1, 0, 1),
+  sig_b2 = runif(1, 0, 1),
+  sig_b3 = runif(1, 0, 1),
+  sig_b4 = runif(1, 0, 1),
+  sig_b5 = runif(1, 0, 1),
+  sig_b6 = runif(1, 0, 1)
+)
+
+# Parameters to estimate
+params <- c('mu_a0', 'mu_alpha0',
+            'mu_a1','mu_a2', 'mu_a3','mu_a4',
+            'mu_b0', 'mu_beta0',
+            'mu_b1','mu_b2', 'mu_b3','mu_b4','mu_b5','mu_b6',
+            "alpha0", "alpha1","alpha2","alpha3","alpha4",
+            "beta0", "beta1","beta2","beta3","beta4","beta5","beta6",
+            "sig_a0", "sig_alpha0",
+            "sig_a1","sig_a2","sig_a3","sig_a4",
+            "sig_b0", "sig_beta0",
+            "sig_b1","sig_b2","sig_b3","sig_b4","sig_b5","sig_b6",
+            "n.occ", "z", "p", "res")
+
+# MCMC settings
+# Call nimble from R and summarize posteriors:
+modnim <- nimbleModel(code = occmod, name = "Occ", constants = Consts, data = Data, inits = Inits)
+
+modelconf <- configureMCMC(modnim, monitors = params)
+modMCMC <- buildMCMC(modelconf)
+CdistModel <- compileNimble(modnim)
+CdistMCMC <- compileNimble(modMCMC, project = modnim)
+
+nbur <- 50000
+nit <- 450000
+thin <- 400
+
+chain1 <- runMCMC(CdistMCMC, 
+                  nchains = 1,
+                  nburnin = nbur,  
+                  niter = nit, 
+                  thin = thin,
+                  samples = TRUE,
+                  samplesAsCodaMCMC = T,
+                  summary = F,
+                  WAIC = FALSE,
+                  perChainWAIC = FALSE,
+                  setSeed = 75)
+chain2 <- runMCMC(CdistMCMC, 
+                  nchains = 1,
+                  nburnin = nbur,  
+                  niter = nit, 
+                  thin = thin,
+                  samples = TRUE,
+                  samplesAsCodaMCMC = T,
+                  summary = F,
+                  WAIC = FALSE,
+                  perChainWAIC = FALSE,
+                  setSeed = 27)
+chain3 <- runMCMC(CdistMCMC, 
+                  nchains = 1,
+                  nburnin = nbur,  
+                  niter = nit, 
+                  thin = thin,
+                  samples = TRUE,
+                  samplesAsCodaMCMC = T,
+                  summary = F,
+                  WAIC = FALSE,
+                  perChainWAIC = FALSE,
+                  setSeed = 57)
+
+mc <- mcmcOutput(mcmc.list(chain1,chain2,chain3))
+```
+
+# Model diagnostics
+
+```{r, message=FALSE, warning=FALSE}
+mc <- mcmcOutput(mcmc.list(chain1[,c(1:292,114309:114348)], chain2[,c(1:292,114309:114348)], chain3[,c(1:292,114309:114348)]))
+
+# Model summary ----
+Summary <- summary(mc ,n.eff=TRUE) 
+parnames <- rownames(Summary)
+table1 <- data.frame()
+for (i in 1:ncol(mc)){ 
+  t <- data.frame(Mean = mean(mc[,i]), Median = median(mc[,i]), ci(mc[,i], 0.89))
+  table1 <- rbind(table1, t)
+}
+table1$Gelman <- Summary$Rhat
+table1$MCEpc <- Summary$MCEpc
+table1$n.eff <- Summary$n.eff
+table1$Param <- parnames
+
+# Check for prior influence on posterior estimates and ensure posterior distribution are not equal to the priors one
+
+niter <- nrow(mc)
+PR1 <- qlogis(runif(niter, 0, 1))
+PR2 <- rnorm(niter, 0, 10) 
+PR3 <- runif(niter, 0, 5)
+
+MCMCtrace(mc, params = 'mu_a0', priors = PR1, pdf = FALSE)
+MCMCtrace(mc, params = 'mu_a1', priors = PR2, pdf = FALSE)
+MCMCtrace(mc, params = 'mu_a2', priors = PR2, pdf = FALSE)
+MCMCtrace(mc, params = 'mu_a3', priors = PR2, pdf = FALSE)
+MCMCtrace(mc, params = 'mu_a4', priors = PR2, pdf = FALSE)
+
+MCMCtrace(mc, params = 'mu_b0', priors = PR1, pdf = FALSE)
+MCMCtrace(mc, params = 'mu_b1', priors = PR2, pdf = FALSE)
+MCMCtrace(mc, params = 'mu_b2', priors = PR2, pdf = FALSE)
+MCMCtrace(mc, params = 'mu_b3', priors = PR2, pdf = FALSE)
+MCMCtrace(mc, params = 'mu_b4', priors = PR2, pdf = FALSE)
+MCMCtrace(mc, params = 'mu_b5', priors = PR2, pdf = FALSE)
+MCMCtrace(mc, params = 'mu_b6', priors = PR2, pdf = FALSE)
+
+PR3 <- runif(niter, 0, 10)
+MCMCtrace(mc, params = 'sig_a0', priors = PR3, pdf = FALSE)
+MCMCtrace(mc, params = 'sig_a1', priors = PR3, pdf = FALSE)
+MCMCtrace(mc, params = 'sig_a2', priors = PR3, pdf = FALSE)
+MCMCtrace(mc, params = 'sig_a3', priors = PR3, pdf = FALSE)
+MCMCtrace(mc, params = 'sig_a4', priors = PR3, pdf = FALSE)
+
+PR4 <- runif(niter, 0, 5)
+MCMCtrace(mc, params = 'sig_b0', priors = PR4, pdf = FALSE)
+MCMCtrace(mc, params = 'sig_b1', priors = PR3, pdf = FALSE)
+MCMCtrace(mc, params = 'sig_b2', priors = PR3, pdf = FALSE)
+MCMCtrace(mc, params = 'sig_b3', priors = PR3, pdf = FALSE)
+MCMCtrace(mc, params = 'sig_b4', priors = PR3, pdf = FALSE)
+MCMCtrace(mc, params = 'sig_b5', priors = PR3, pdf = FALSE)
+MCMCtrace(mc, params = 'sig_b6', priors = PR3, pdf = FALSE)
+```
+
+# Goodness-of-fit
+
+```{r, message=FALSE, warning=FALSE}
+# Get sites sampled per season
+repsampled<-list()
+for (y in 1:nyears){
+  xA <- Y[,,y,1]
+  xB <- which(apply(xA, 1, function(y) !all(is.na(y))), arr.ind = T) # Extract row name that was surveyed each saason
+  repsampled[[y]] <- xB
+}
+
+#Estimate number of replicates per site per season
+n<-list()
+for (y in 1:nyears){
+  xA <- Y[,,y,1]
+  xB <- rowSums(!is.na(xA))
+  n[[y]] <- xB
+}
+
+# Calculate number of observations per site per season
+obs<-list()
+for(s in 1:nspecies){
+  xC <- array(NA, c(nsites, nyears))
+  for (y in 1:nyears){
+    xA <- Y[,,y,s]
+    xB <- rowSums(xA, na.rm=TRUE)
+    xC[,y] <- xB
+  }
+  obs[[s]] <- xC
+}
+
+#Estimate number of replicates per site per year
+nvisists <- matrix(NA,nsites,nyears)
+for(y in 1:nyears){
+  temp <- Y[,,y,1]
+  nvisists[,y] <- rowSums(!is.na(temp))
+} #y
+
+## Arrange p
+
+ps <- array(NA, dim = c(nrow(mcp), nsites, nreps, nyears, nspecies))
+
+spec <-  seq(0,(nsites*nreps*nyears*nspecies), (nsites*nreps*nyears))
+years <- seq(0,(nsites*nreps*nyears), (nsites*nreps))
+num <- seq(0,(nsites*nreps),nsites)
+
+for(s in 1:nspecies){
+  temp <- mcp[, (1+spec[s]):(spec[s+1])]
+  for(y in 1:nyears){
+    temp2 <- temp[, (1+years[y]):(years[y+1])]
+    for(i in 1:nreps){
+      ps[,,i,y,s] <- temp2[,(1+num[i]):(num[i+1])]
+    }}}
+
+psSum <- array(NA, dim = c(nrow(mcp), nsites, nyears, nspecies))
+
+for(s in 1:nspecies){
+  for(y in 1:nyears){
+    for(i in repsampled[[y]]) {
+      for(j in n[[y]][i]){
+        psSum[,i,y,s] <- ifelse(j==1, ps[,i,1:j,y,s], rowSums(ps[,i,1:j,y,s]))
+      }}}}
+
+
+# Arrange z
+zs <- array(NA, dim = c(nrow(mcz), nsites, nyears, nspecies))
+
+numy <- seq(0,(nsites*nyears*nspecies), nsites*nyears)
+numz <- seq(0,(nsites*nyears), nsites)
+
+for(s in 1:nspecies){
+  temp <- mcz[,(1+numy[s]):(numy[s+1])]
+  for(y in 1:nyears){
+    zs[,,y,s] <- temp[,(1+numz[y]):(numz[y+1])]
+  }}
+
+
+# Calculate Freeman-Tukey Bayesian p-value
+Tobs22 <- Tsim22 <- array(NA, dim = c(nrow(zs), nspecies))
+
+for(s in 1:nspecies){
+  Tobs2 <- Tsim2 <- array(NA, dim = c(nrow(zs), nyears))
+  for(y in 1:nyears){
+    for(iter in 1:nrow(zs)) {
+      yTemp <- array(NA, dim = c(nsites, nreps)) # Create empty array to fill with a simulated dataset
+      for(i in repsampled[[y]]){
+        for(j in 1:n[[y]][i]){
+          yTemp[i,j] <- rbinom(1,1,(ps[iter,i,j,y,s]*zs[iter,i,y,s])) # Simulate dataset
+        }}
+      Tobs2[iter,y] <- sum((sqrt(obs[[s]][repsampled[[y]],y]) - sqrt(psSum[iter,repsampled[[y]],y,s] * zs[iter,repsampled[[y]],y,s]))^2) # Freeman-Tukey statistic for observed data
+      ySim <- rowSums(yTemp[repsampled[[y]],], na.rm=TRUE) # Calculate total number of observations from simulated data
+      Tsim2[iter,y] <- sum((sqrt(ySim) - sqrt(psSum[iter,repsampled[[y]],y,s] * zs[iter,repsampled[[y]],y,s]))^2) # Freeman-Tukey statistic for simulated data
+    }
+    
+  }
+  Tobs22[,s] <- apply(Tobs2, 1, sum)
+  Tsim22[,s] <- apply(Tsim2, 1, sum)
+}
+ 
+Tobs222 <- apply(Tobs22, 1, sum)
+Tsim222 <- apply(Tsim22, 1, sum)
+
+MASS::eqscplot(Tobs222, Tsim222, xlim=range(Tobs222, Tsim222), ylim=range(Tobs222, Tsim222), xlab="Observed data", ylab="Simulated data")
+abline(0, 1, lwd=2, col='red')
+mean(Tsim222 < Tobs222) # the P value
+
+### Compare naive occupancy
+SimNaivOcc <- data.frame()
+for(s in 1:nspecies){
+  temp2 <- data.frame()
+  for(iter in 1:nrow(zs)){
+    for(y in 1:nyears){
+      yTemp <- array(NA, dim = c(nsites, nreps))
+      for(i in 1:nsites){
+        for(j in 1:n[[y]][i]){
+          yTemp[i,j] <- rbinom(1,1,(ps[iter,i,j,y,s]*zs[iter,i,y,s]))
+        }}
+      Sum1<-apply(yTemp, 1, sum,na.rm=TRUE)
+      sum2<-replace(Sum1,which(Sum1>0),1)
+      sum3<-sum(sum2[repsampled[[y]]])
+      temp<- data.frame(y = sum3/length(repsampled[[y]]), Year = y, Sim = iter, Species = speciesnames[s])
+      temp2 <- rbind(temp2, temp)
+    }
+  }
+  SimNaivOcc <- rbind(SimNaivOcc, temp2)
+}
+
+resultssim <- SimNaivOcc %>% group_by(Species, Year, Sim) %>% summarise(mean(y))
+
+finalsim <- resultssim %>% group_by(Species, Year) %>% summarise(mean(`mean(y)`), sd(`mean(y)`)) %>% as.data.frame()
+colnames(finalsim) <- c("Species","Year","Mean","SD")
+
+#Naive occupancy
+Naiveocc <- data.frame()
+for(s in 1:nspecies){
+  x <- Y[,,,s]
+  for(t in 1:nyears){
+    x1 <- data.frame(x[,,t])
+    x2 <- x1 |> drop_na(X1)
+    sum1<-apply(x2, 1, sum,na.rm=TRUE)
+    sum2<-ifelse(sum1 > 0, 1, 0)
+    sum3<-sum(sum2)
+    temp2<- data.frame(y = sum3/length(sum2), Species = speciesnames[s], Year = t)
+    Naiveocc <- rbind(Naiveocc, temp2)
+  }
+}
+Naiveocc
+
+table <- cbind(Naiveocc,finalsim)
+table$dif <- abs(table$y - table$Mean)
+table$percDiff <- table$dif * 100/table$y
+table
+
+mean(table$percDiff)
+sd(table$percDiff)
+range(table$percDiff)
+hist(table$percDiff)
+```
+
+# Spatial autocorrelation
+
+```{r, message=FALSE, warning=FALSE}
+library(pgirmess)
+library(sf)
+
+Grid <- st_read("./Data/Centroids.shp")
+Grid$CellID <- sprintf("%05d", as.numeric(Grid$CellID))
+centroid <- left_join(data.frame(CellID = sites), Grid) 
+centroid <- st_sf(centroid, geometry = centroid$geometry)
+coords <- st_coordinates(centroid)
+
+# Arrange res
+res <- array(NA, dim = c(nrow(mc), nsites, nyears, nspecies))
+
+numy <- seq(0,(nsites*nyears*nspecies), nsites*nyears)
+numz <- seq(0,(nsites*nyears), nsites)
+
+for(s in 1:nspecies){
+  temp <- mc[,(1+numy[s]):(numy[s+1])]
+  for(y in 1:nyears){
+    res[,,y,s] <- temp[,(1+numz[y]):(numz[y+1])]
+  }}
+
+output <- NULL
+for(y in 1:nyears){
+for(s in 1:nspecies) {
+  temp1 <- apply(res[,,y,s], 2, mean)
+  pgi.cor <- correlog(coords=coords, z=temp1, method="Moran", nbclass = NULL) %>% as.data.frame() %>% mutate(species = speciesnames[s], Year = years[y]) %>% filter(dist.class < 200000)
+  output <- rbind(output, pgi.cor)
+}}
+
+mean(output$coef)
+sd(output$coef)
+range(output$coef)
+
+# Change scientific name of Jackdaw 
+output$species[output$species == "Corvus monedula"] <- "Coloeus monedula"
+
+(MoranIplot <- ggplot(output, aes(x=dist.class/1000, y=coef, colour = as.factor(Year), group = as.factor(Year))) + facet_wrap(~species) + scale_y_continuous(limits = c(-1,1)) + geom_line() + 
+    theme_minimal() + labs(title="Moran's I correlogram", x="Distance (km)", y="Moran's I") + theme(plot.title = element_text(hjust = 0.5), strip.text = element_text(face = "italic")) + guides(colour = guide_legend(title = "Year"))  )
+```
+
+# Figures
+
+```{r, message=FALSE, warning=FALSE}
+# Species names for figures
+commonnames <- c("European Goldfinch", "Hooded Crow", "Rook", "Western Jackdaw", "Eurasian Blue Tit", "European Robin", "Common Chaffinch", "White Wagtail", "Great Tit", "House Sparrow", "Eurasian Magpie", "Common Starling", "Eurasian Wren", "Common Blackbird", "Community")
+namelevels <- c("White Wagtail", "Western Jackdaw", "Rook", "House Sparrow", "Hooded Crow", "Great Tit", "European Robin", "European Goldfinch", "Eurasian Wren", "Eurasian Magpie", "Eurasian Blue Tit", "Common Starling", "Common Chaffinch", "Common Blackbird", "Community")
+
+# Figure caterpiller plot for covariates ----
+
+## Detection probability ----
+
+### Intercept ----
+mubeta0_rowsP <- grepl(colnames(mc), pattern = "^mu_b0")
+beta0_rowsP <- grepl(colnames(mc), pattern = "^beta0\\[")
+
+
+### Wind ----
+mub1_rowsP <- grepl(colnames(mc), pattern = "^mu_b1")
+beta1_rowsP <- grepl(colnames(mc), pattern = "^beta1\\[")
+beta1P <- cbind(mc[,beta1_rowsP], mc[,mub1_rowsP])
+beta1df <- data.frame()
+for(i in 1:(nspecies+1)){
+  PSpos <- mean(beta1P[,i] > 0)
+  PSneg <- mean(beta1P[,i] < 0)
+  temp <- data.frame(Species = commonnames[i], Median = median(beta1P[,i]), ci(beta1P[,i], 0.89), PS = ifelse(mean(beta1P[,i]) > 0, PSpos, PSneg), Cov = 'Wind speed')
+  beta1df <- rbind(beta1df,temp)
+}
+
+### Hour of day ----
+mub2_rowsP <- grepl(colnames(mc), pattern = "^mu_b2")
+beta2_rowsP <- grepl(colnames(mc), pattern = "^beta2\\[")
+beta2P <- cbind(mc[,beta2_rowsP], mc[,mub2_rowsP])
+beta2df <- data.frame()
+for(i in 1:(nspecies+1)){
+  PSpos <- mean(beta2P[,i] > 0)
+  PSneg <- mean(beta2P[,i] < 0)
+  temp <- data.frame(Species = commonnames[i], Median = median(beta2P[,i]), ci(beta2P[,i], 0.89), PS = ifelse(mean(beta2P[,i]) > 0, PSpos, PSneg), Cov = "Hour of day")
+  beta2df <- rbind(beta2df,temp)
+}
+
+###  HourofDay 2 ----
+mub3_rowsP <- grepl(colnames(mc), pattern = "^mu_b3")
+beta3_rowsP <- grepl(colnames(mc), pattern = "^beta3\\[")
+beta3P <- cbind(mc[,beta3_rowsP], mc[,mub3_rowsP])
+beta3df <- data.frame()
+for(i in 1:(nspecies+1)){
+  PSpos <- mean(beta3P[,i] > 0)
+  PSneg <- mean(beta3P[,i] < 0)
+  temp <- data.frame(Species = commonnames[i], Median = median(beta3P[,i]), ci(beta3P[,i], 0.89), PS = ifelse(mean(beta3P[,i]) > 0, PSpos, PSneg), Cov = "Hour of day^2")
+  beta3df <- rbind(beta3df,temp)
+}
+
+### HMI ----
+mub4_rowsP <- grepl(colnames(mc), pattern = "^mu_b4")
+beta4_rowsP <- grepl(colnames(mc), pattern = "^beta4\\[")
+beta4P <- cbind(mc[,beta4_rowsP], mc[,mub4_rowsP])
+beta4df <- data.frame()
+for(i in 1:(nspecies+1)){
+  PSpos <- mean(beta4P[,i] > 0)
+  PSneg <- mean(beta4P[,i] < 0)
+  temp <- data.frame(Species = commonnames[i], Median = median(beta4P[,i]), ci(beta4P[,i], 0.89), PS = ifelse(mean(beta4P[,i]) > 0, PSpos, PSneg), Cov = "Human modification")
+  beta4df <- rbind(beta4df,temp)
+}
+
+### Effort Min ----
+mub5_rowsP <- grepl(colnames(mc), pattern = "^mu_b5")
+beta5_rowsP <- grepl(colnames(mc), pattern = "^beta5\\[")
+beta5P <- cbind(mc[,beta5_rowsP], mc[,mub5_rowsP])
+beta5df <- data.frame()
+for(i in 1:(nspecies+1)){
+  PSpos <- mean(beta5P[,i] > 0)
+  PSneg <- mean(beta5P[,i] < 0)
+  temp <- data.frame(Species = commonnames[i], Median = median(beta5P[,i]), ci(beta5P[,i], 0.89), PS = ifelse(mean(beta5P[,i]) > 0, PSpos, PSneg), Cov = "Effort min.")
+  beta5df <- rbind(beta5df,temp)
+}
+
+### Observer Expertice Index ----
+mub6_rowsP <- grepl(colnames(mc), pattern = "^mu_b6")
+beta6_rowsP <- grepl(colnames(mc), pattern = "^beta6\\[")
+beta6P <- cbind(mc[,beta6_rowsP], mc[,mub6_rowsP])
+beta6df <- data.frame()
+for(i in 1:(nspecies+1)){
+  PSpos <- mean(beta6P[,i] > 0)
+  PSneg <- mean(beta6P[,i] < 0)
+  temp <- data.frame(Species = commonnames[i], Median = median(beta6P[,i]), ci(beta6P[,i], 0.89), PS = ifelse(mean(beta6P[,i]) > 0, PSpos, PSneg), Cov = "OEI")
+  beta6df <- rbind(beta6df,temp)
+}
+postBeta <- rbind(beta1df, beta2df, beta3df, beta4df, beta5df, beta6df)
+
+### Visualise beta means & 89% CIs ----
+(pbeta <- ggplot(postBeta, aes(x=factor(Species, levels = namelevels), y=Median, colour=PS*100)) + geom_hline(yintercept=0,linetype = 'dashed', size=1) + coord_flip() + facet_wrap(~Cov, scales='free_x', ncol = 3) +
+   geom_point(size=3) + geom_errorbar(aes(ymin=CI_low, ymax=CI_high), width=0, size=1) +
+   scale_colour_gradient2(name='Posterior\nprobability (%)', low='#FDE725FF', mid = '#22A884FF', high='#440154FF', midpoint = 80) + ylab('Parameter estimate') + xlab(NULL) +
+   theme(axis.text.x=element_text(size=11),
+         axis.text.y=element_text(size=11), 
+         axis.text=element_text(size=11), 
+         axis.title=element_text(size=12), axis.line=element_line(linewidth=1),
+         axis.ticks=element_line(linewidth=1), axis.ticks.length=unit(2, "mm"),
+         strip.text=element_text(size=11,face='bold'), strip.background=element_blank(),
+         legend.title=element_text(size=12), legend.text=element_text(size=12), 
+         plot.title=element_text(hjust=0.5,face='bold',size=12),
+         panel.border=element_blank(), panel.grid=element_blank()) + ggtitle('Detection Probability'))
+
+## Occupancy probability ----
+
+### Intercept ----
+mualpha0_rowsP <- grepl(colnames(mc), pattern = "^mu_a0")
+alpha0_rowsP <- grepl(colnames(mc), pattern = "^alpha0\\[")
+
+### Elevation ----
+mua1_rowsP <- grepl(colnames(mc), pattern = "^mu_a1")
+alpha1_rowsP <- grepl(colnames(mc), pattern = "^alpha1\\[")
+alpha1P <- cbind(mc[,alpha1_rowsP], mc[,mua1_rowsP])
+alpha1df <- data.frame()
+for(i in 1:(nspecies+1)){
+  PSpos <- mean(alpha1P[,i] > 0)
+  PSneg <- mean(alpha1P[,i] < 0)
+  temp <- data.frame(Species = commonnames[i], Median = median(alpha1P[,i]), ci(alpha1P[,i], 0.89), PS = ifelse(mean(alpha1P[,i]) > 0, PSpos, PSneg), Cov = "Elevation (m)")
+  alpha1df <- rbind(alpha1df,temp)
+}
+
+### WVC ----
+mua2_rowsP <- grepl(colnames(mc), pattern = "^mu_a2")
+alpha2_rowsP <- grepl(colnames(mc), pattern = "^alpha2\\[")
+alpha2P <- cbind(mc[,alpha2_rowsP],mc[,mua2_rowsP])
+alpha2df <- data.frame()
+for(i in 1:(nspecies+1)){
+  PSpos <- mean(alpha2P[,i] > 0)
+  PSneg <- mean(alpha2P[,i] < 0)
+  temp <- data.frame(Species = commonnames[i], Median = median(alpha2P[,i]), ci(alpha2P[,i], 0.89),  PS = ifelse(mean(alpha2P[,i]) > 0, PSpos, PSneg), Cov = "Woody veg. cov.")
+  alpha2df <- rbind(alpha2df,temp)
+}
+ 
+###  Human Modification Index ----
+mua3_rowsP <- grepl(colnames(mc), pattern = "^mu_a3")
+alpha3_rowsP <- grepl(colnames(mc), pattern = "^alpha3\\[")
+alpha3P <- cbind(mc[,alpha3_rowsP],mc[,mua3_rowsP])
+alpha3df <- data.frame()
+for(i in 1:(nspecies+1)){
+  PSpos <- mean(alpha3P[,i] > 0)
+  PSneg <- mean(alpha3P[,i] < 0)
+  temp <- data.frame(Species = commonnames[i], Median = median(alpha3P[,i]), ci(alpha3P[,i], 0.89), PS = ifelse(mean(alpha3P[,i]) > 0, PSpos, PSneg), Cov = "HMI")
+  alpha3df <- rbind(alpha3df,temp)
+}
+
+###  Agricultural cover ----
+mua4_rowsP <- grepl(colnames(mc), pattern = "^mu_a4")
+alpha4_rowsP <- grepl(colnames(mc), pattern = "^alpha4\\[")
+alpha4P <- cbind(mc[,alpha4_rowsP],mc[,mua4_rowsP])
+alpha4df <- data.frame()
+for(i in 1:(nspecies+1)){
+  PSpos <- mean(alpha4P[,i] > 0)
+  PSneg <- mean(alpha4P[,i] < 0)
+  temp <- data.frame(Species = commonnames[i], Median = median(alpha4P[,i]), ci(alpha4P[,i], 0.89), PS = ifelse(mean(alpha4P[,i]) > 0, PSpos, PSneg), Cov = "Agri. land cover")
+  alpha4df <- rbind(alpha4df,temp)
+}
+
+
+postAlpha <- rbind(alpha1df, alpha2df, alpha3df, alpha4df)
+postAlpha$Cov <- factor(postAlpha$Cov, levels = c(
+  "Elevation (m)",
+  "Woody veg. cov.",
+  "HMI",
+  "Agri. land cover"
+))
+
+### Visualise means & 89% CIs ----
+(occalpha <- ggplot(postAlpha, aes(x=factor(Species, levels = namelevels), y=Median, colour=PS*100)) + geom_hline(yintercept=0,linetype = 'dashed', size=1) + coord_flip() + facet_wrap(~Cov, scales='free_x', ncol = 2) +
+   geom_point(size=3) + geom_errorbar(aes(ymin=CI_low, ymax=CI_high), width=0, size=1) +
+   scale_colour_gradient2(name='Posterior\nprobability (%)', low='#FDE725FF', mid = '#22A884FF', high='#440154FF', midpoint = 80) + ylab('Parameter estimate') + xlab(NULL) +
+   theme(axis.text.x=element_text(size=11),
+         axis.text.y=element_text(size=11), 
+         axis.title=element_text(size=12), axis.line=element_line(size=1),
+         axis.ticks=element_line(size=1), axis.ticks.length=unit(2, "mm"),
+         strip.text=element_text(size=11,face='bold'), strip.background=element_blank(),
+         legend.title=element_text(size=12), legend.text=element_text(size=12), 
+         plot.title=element_text(hjust=0.5,face='bold',size=12),
+         panel.border=element_blank(), panel.grid=element_blank()) + ggtitle('Occupancy Probability'))
+
+# Percentage area occupied ----
+## Naive occupancy ----
+Naiveocc <- data.frame()
+for(s in 1:nspecies){
+  x <- Y[,,,s]
+  for(t in 1:nyears){
+    x1 <- data.frame(x[,,t])
+    x2 <- x1 |> drop_na(X1)
+    sum1<-apply(x2, 1, sum,na.rm=TRUE)
+    sum2<-ifelse(sum1 > 0, 1, 0)
+    sum3<-sum(sum2)
+    temp2<- data.frame(y = sum3/length(sum2), Species = commonnames[s], Year = years[t])
+    Naiveocc <- rbind(Naiveocc, temp2)
+  }
+}
+Naiveocc
+
+occ_rowsP <- grepl(colnames(mc), pattern = "^n.occ\\[")
+occP <- mc[,occ_rowsP]
+
+occ4plot <- data.frame()
+for (i in 1:ncol(occP)){
+  temp <- data.frame(y = median(occP[,i]), yUpper = ci(occP[,i], 0.89)$CI_high, yLower = ci(occP[,i], 0.89)$CI_low)
+  occ4plot <- rbind(occ4plot, temp)
+}
+
+occ4plot$Year <- rep(years, times = nspecies)
+occ4plot$Species <- rep(commonnames[-15], each = nyears)
+
+## Plot Occ figure ----
+(OccPlot <- ggplot(occ4plot, aes(x=as.factor(Year), y=y)) + facet_wrap(~Species, scales='free_x', ncol = 5) +
+    labs(y="Proportion of areas occupied (89% CI)", x = "") + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust= 1)) + 
+    geom_errorbar(aes(ymin=yLower, ymax=yUpper), width=0, size=1, color = 'darkgrey') + geom_point(size=2) + geom_point(data = Naiveocc, aes(x= as.factor(Year), y=y), shape = 17, size=2) +
+    theme(axis.line=element_line(size=1),
+          axis.ticks=element_line(size=1),
+          axis.text.x=element_text(size=11),
+          axis.ticks.length=unit(1, "mm"),
+          strip.text=element_text(size=9), strip.background=element_blank(), panel.border=element_blank(), panel.grid=element_blank()))
+```
+
+# Model validation
+
+```{r, message=FALSE, warning=FALSE}
+library(pROC)
+## Load CBS observation data ----
+CBS <- read.csv("./Data/counts.csv")
+visits<- read.csv("./Data/visits.csv")
+
+# Join datasets
+fullCBSdata <- left_join(CBS,visits)
+
+# Filter 2018 to 2022
+SquaresTemp <- visits %>% filter(Season %in% c(2018,2019, 2022,2023))
+YearsCBS <- unique(SquaresTemp$Season)
+
+## Nr of sites
+Squares <- as.factor(sort(unique(SquaresTemp$Square)))
+nSquares <- length(Squares)
+
+## Nr of reps
+Visits <- c("E","L")
+
+speciescodes <- c("GO", "HC", "RO", "JD", "BT", "R.", "CH", "PW", "GT", "HS", "MG", "SG", "WR", "B.")
+
+spec <- data.frame(speciescodes, speciesnames)
+names(spec) <- c("SpeciesCode", "Species")
+
+# Arrange data
+CBS_BB <- fullCBSdata %>% filter(Season %in% YearsCBS, SpeciesCode %in% speciescodes, CQID == 1)
+
+CBS_BB <- left_join(CBS_BB, spec, by = "SpeciesCode")
+
+#Sort by year
+CBS_BB <- arrange(CBS_BB, Season, Square, Species)
+
+#Generate observation array
+yCBS <- array(NA, dim = c(nSquares,2,length(YearsCBS),nspecies))
+for(s in 1:nspecies){
+for(t in 1:length(YearsCBS)){
+  J <- filter(CBS_BB, Season == YearsCBS[t], Species == speciesnames[s])
+  J <- group_by(J,  Square, Visit) %>% dplyr::summarize(n = n())
+  W <- data.frame(rep(Squares, rep(2, nSquares)), rep(Visits, nSquares))
+  colnames(W) <- c("Square", "Visit")
+  Y <- full_join(W, J, by = c("Square", "Visit"))
+  Y$n[is.na(Y$n)] = 0
+  X <- split(Y$n, f = Y$Square)
+  X <- do.call(rbind, X)
+  yCBS[,,t,s] <- X
+}}
+
+# Combine to presence absence assuming perfect detection
+CSB_BB2 <- array(NA, dim = c(nSquares, length(YearsCBS), nspecies))
+
+for(s in 1:nspecies){
+for(t in 1:length(YearsCBS)){
+  sum1<-apply(yCBS[,,t,s], 1, sum, na.rm=T)
+  sum2<-ifelse(sum1 > 0, 1, 0)
+  CSB_BB2[,t,s] <- sum2
+}}
+
+# Fill with NA in squares where sampling did not happen
+for(s in 1:nspecies){
+for(t in 1:length(YearsCBS)){
+  J1 <- filter(visits, Season == YearsCBS[t] & Visit == Visits[1])
+  Sq1 <- sort(unique(J1$Square))
+  SQNA1 <- Squares[!Squares %in% Sq1]
+  SQNA1 <- as.integer(SQNA1)
+  
+  J2 <- filter(visits, Season == YearsCBS[t] & Visit == Visits[2])
+  Sq2 <- sort(unique(J2$Square))
+  SQNA2 <- Squares[!Squares %in% Sq2]
+  SQNA2 <- as.integer(SQNA2)
+  SQNA <- sort(unique(c(SQNA1,SQNA2)))
+  CSB_BB2[SQNA,t,s] <- NA
+}}
+
+
+# Load squares and covariates raster
+library(terra)
+library(sf)
+Env_raster <- rast("./Data/Env_raster.tif")
+spdf <- st_read("./Data/Squares.shp")
+spdf <- st_transform(spdf, crs = 32629)
+
+env_rasterstd <- c((Env_raster$Elev - meanEle)/sdEle,
+                   (Env_raster$WoodVegCov - meanWoodVegCov)/sdWoodVegCov,
+                   (Env_raster$HMI - meanHMI)/sdHMI,
+                   (Env_raster$Agriculture- meanAgriculture))
+SquaresED <- extract(env_rasterstd, spdf, fun = mean)
+SquaresED$Square <- spdf$Square
+
+# Get parameters
+## Intercept 
+alpha0_rowsP <- grepl(colnames(mc), pattern = "^alpha0\\[")
+alpha1_rowsP <- grepl(colnames(mc), pattern = "^alpha1\\[")
+alpha2_rowsP <- grepl(colnames(mc), pattern = "^alpha2\\[")
+alpha3_rowsP <- grepl(colnames(mc), pattern = "^alpha3\\[")
+alpha4_rowsP <- grepl(colnames(mc), pattern = "^alpha4\\[")
+
+alpha0Ps <- cbind(mc[,alpha0_rowsP])
+yearsseq <- seq(0,(nyears*nspecies),nyears)
+alpha0P <- array(NA,  c(nrow(mc),nyears,nspecies))
+for(s in 1:nspecies){
+  alpha0P[,,s] <- alpha0Ps[,(1+yearsseq[s]):(yearsseq[s+1])]
+}
+
+alpha1P <- cbind(mc[,alpha1_rowsP])
+alpha2P <- cbind(mc[,alpha2_rowsP])
+alpha3P <- cbind(mc[,alpha3_rowsP])
+alpha4P <- cbind(mc[,alpha4_rowsP])
+
+ROCTable <- matrix(NA, nrow = nspecies, ncol = 4)
+
+for(s in 1:nspecies){
+  
+  temp <- data.frame(Squares, CSB_BB2[,,s])
+  names(temp) <- c("Square", YearsCBS)
+
+  # Join datasets
+  CSB_BB <- left_join(temp,SquaresED, by = "Square") 
+  
+  ## Predictions 
+  PostPred <- matrix(NA, nrow = nrow(CSB_BB), ncol = 4)
+  for(y in 1:4){
+    PostPred[,y] <- plogis(median(alpha0P[,y,s]) + median(alpha1P[,s]) * CSB_BB$Elev + median(alpha2P[,s]) * CSB_BB$WoodVegCov + median(alpha3P[,s]) * CSB_BB$HMI +  median(alpha4P[,s]) * CSB_BB$Agriculture)
+  }
+  
+  ## Calculate area under curve ----
+  
+  data4roc <- as.data.frame(cbind(c(CSB_BB$`2018`,CSB_BB$`2019`,CSB_BB$`2022`,CSB_BB$`2023`), c(PostPred[,1],PostPred[,2],PostPred[,3],PostPred[,4]))) 
+  
+  # Overall
+  #ROCTable[s,1] <- as.numeric(roc(data4roc$V1,data4roc$V2, percent=TRUE, plot=TRUE, ci=TRUE)$auc)
+  # Per year
+  ROCTable[s,1] <- as.numeric(roc(CSB_BB$`2018`,PostPred[,1], percent=TRUE, plot=TRUE, ci=TRUE)$auc)
+  ROCTable[s,2] <- as.numeric(roc(CSB_BB$`2019`,PostPred[,2], percent=TRUE, plot=TRUE, ci=TRUE)$auc)
+  ROCTable[s,3] <- as.numeric(roc(CSB_BB$`2022`,PostPred[,3], percent=TRUE, plot=TRUE, ci=TRUE)$auc)
+  ROCTable[s,4] <- as.numeric(roc(CSB_BB$`2023`,PostPred[,4], percent=TRUE, plot=TRUE, ci=TRUE)$auc)
+}
+
+ROCTable <- data.frame(speciesnames, commonnames[-15], ROCTable, apply(ROCTable, 1, mean))
+colnames(ROCTable) <- c("Scientific name", "Common name","2018","2019","2022","2023", "Mean")
+ROCTable
+write.csv(ROCTable, file = "./Outputs/ROCTable.csv")
+
+sum(ROCTable[,3:6] < 60)/(4*14) * 100
+sum(ROCTable[,3:6] >= 60 & ROCTable[,3:6] < 70)/(4*14) * 100
+sum(ROCTable[,3:6] >= 70 & ROCTable[,3:6] < 80)/(4*14) * 100
+sum(ROCTable[,3:6] >= 80)/(4*14) * 100 
+
+apply(ROCTable[,3:6], 2, mean)
+```

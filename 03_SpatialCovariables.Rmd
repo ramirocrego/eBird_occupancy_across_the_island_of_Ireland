@@ -1,0 +1,142 @@
+```{r, message=FALSE, warning=FALSE}
+# Laod libraries
+library(geodata)
+library(terra)
+library(sf)
+library(tidyverse)
+library(tmap)
+```
+
+# Create grid across the island of Ireland
+
+```{r, message=FALSE, warning=FALSE}
+# Create a grid
+Ireland <- st_read("./Shapefiles/Ireland.shp")
+
+Grid <- st_make_grid(Ireland, cellsize = 1000, crs = 32629, square = T) %>% st_as_sf()
+
+# Select cells intesecting transects and add an ID
+Grid <- Grid[st_buffer(Ireland,1000),]
+Grid$CellID <- 1:nrow(Grid) # Generate a cell ID
+Centroids <- st_centroid(Grid)
+```
+
+# Environmental variable
+
+```{r, message=FALSE, warning=FALSE}
+# Load elev data
+elevation <- rast("./Data/Elev.tif")
+elevation_proj <- terra::project(elevation, "+init=epsg:32629", method = 'bilinear', res=1000)
+
+# Load hmi data
+hmi <- rast("./Data/GHMI.tif")
+hmi_proj <- terra::project(hmi,elevation_proj, method = 'bilinear', res=1000)
+
+# Crete template for cropping rasters
+Ireland <- st_read("./Shapefiles/Ireland.shp")
+mask <- rasterize(Ireland, hmi_proj)
+
+#Mask variables to just the island
+#TreeCover<-mask(tree_cover_proj, mask)
+Elev <- mask(elevation_proj, mask)
+HMI<-mask(hmi_proj, mask)
+```
+
+```{r}
+# Extract cover of >1 woody veg per cell
+# Initialize rgee
+library(rgee)
+ee_Initialize()
+
+canopyHeight = ee$ImageCollection('projects/meta-forest-monitoring-okw37/assets/CanopyHeight')$mosaic()
+# Mask out ocean pixels
+# Load elevation data from the data catalog and calculate slope, aspect, and a simple hillshade from the terrain Digital Elevation Model.
+elevation = ee$Image("USGS/SRTMGL1_003")
+watermask =  elevation$gt(0) # Create a water mask
+treenotree = canopyHeight$gte(1)$unmask(0)$updateMask(watermask)
+
+Grid$uniq <- rep(1:1000, each=4000)[1:nrow(Grid)] 
+dataoutput <- data.frame()
+for(i in 1:max(Grid$uniq)){
+  data1 <- Grid %>% filter(uniq == i)
+  temp = ee_extract(x=treenotree, y=data1, fun=ee$Reducer$mean(), sf=F, scale = 1)
+  # append
+  dataoutput <- rbind(dataoutput, temp)
+}
+
+unique(dataoutput$uniq)
+
+woodvegcovertemp <- cbind(Grid, dataoutput$cover_code)
+woodvegcoverRast <- rasterize(woodvegcovertemp, mask, field = "woodvegcover.cover_code", fun = mean, background = NA)
+woodvegcoverRast <- woodvegcoverRast*100
+plot(woodvegcoverRast)
+```
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+tempsrast <- rast("./Data/Env_raster.tif")
+woodvegcoverRast <- tempsrast$WoodVegCov
+centroids <- st_read("./Data/Centroids.shp")
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Load LandCover
+LandCover <- rast("./Data/LandCover.tif")
+canvas <- disagg(elevation_proj, fact = 7)
+LandCover_proj <- terra::project(LandCover, canvas, method = 'near')
+LandCover = subst(LandCover_proj, 
+                       c(111,112,121,122,123,124,131,132,133,141,142,
+                         211,212,213,221,222,223,231,241,242,243,244,
+                         311,313,322,323,324,
+                         312,
+                         321,
+                         331,332,333,334,335,
+                         411,412,421,422,423,
+                         511,512,521,522,523),
+                       c(1,1,1,1,1,1,1,1,1,1,1, #Art
+                         2,2,2,2,2,2,2,2,2,2,2, #Agricultural
+                         3,3,3,3,3, #Woddy veg
+                         4, #Plantations
+                         5, #Natural grassland
+                         6,6,6,6,6, # Bare ground
+                         7,7,7,7,7, # Wetlands
+                         8,8,8,8,8)) #Water
+
+lcs <- terra::extract(LandCover, Grid)
+temp <- lcs |> group_by(ID) |> summarise(Artificial = sum(landcover == 1)/n()*100, Agriculture = sum(landcover == 2)/n()*100, WoodVeg = sum(landcover == 3)/n()*100, Plantations = sum(landcover == 4)/n()*100, NaturalGrass = sum(landcover == 5)/n()*100, OpenSpace = sum(landcover == 6)/n()*100, Wetlands = sum(landcover == 7)/n()*100, Water = sum(landcover == 8)/n()*100)
+Landcover <- cbind(Grid, temp)
+summary(Landcover)
+
+# Rasterize each land cover type separately
+rasterize_landcover <- function(attribute) {
+  if (attribute %in% colnames(Landcover)) {
+    rasterized <- rasterize(Landcover, mask, field = attribute, fun = mean, background = NA)
+    return(rasterized)
+  } else {
+    stop(paste("Error: The attribute", attribute, "is not a field in the Landcover dataframe."))
+  }
+}
+
+# Rasterize Agriculture Land Cover 
+Agriculture_rast <- rasterize_landcover("Agriculture")
+Agriculture_rast <- mask(Agriculture_rast, mask)
+
+#Save rasters
+env_raster <- c(Elev, HMI, woodvegcoverRast, Agriculture_rast)
+names(env_raster) <- c("Elev","HMI","WoodVegCov", "Agriculture")
+
+#writeRaster(env_raster, "./Data/Env_raster.tif", overwrite = T)
+
+# Plot explanatory variables used in final analysis
+plot(env_raster, axes=F, main = c("Elevation", "Hum. Mod. Index", "Woody Veg. Cover", "Agriculture Cover"))
+
+# Extract the values for each cell 
+env_variables <- terra::extract(env_raster,centroids)
+summary(env_variables)
+
+save(env_variables,file= "./Data/enviro_variables.RData")
+
+# Correlation analysis
+library(corrgram)
+cor(env_variables[,-1] %>% drop_na())
+corrgram(env_variables[,-1], order=TRUE, lower.panel=panel.shade, upper.panel=panel.pie, text.panel=panel.txt, abs = T) 
+
+```

@@ -1,0 +1,300 @@
+```{r, message=FALSE, warning=FALSE}
+# Laod libraries
+library(auk)
+library(sf)
+library(tidyverse)
+library(FNN)
+library(tmap)
+```
+
+```{r}
+load("./Data/sf_data.RData")
+species_full <- read.csv("./Data/sp_prev.csv")
+speciesnamesfull <- species_full$Scientific.Name
+load("./Data/ObsExIndex.RData") # Observer experience index
+# Join observer experience index to the data
+sf_data <- left_join(sf_data, ObsExIndex, by = "Observer ID")
+
+# Delete checklists with NAs in observation count
+naobs <- sf_data |> filter(is.na(`Observation Count`))
+nachecklists <- unique(naobs$`Checklists ID`)
+sf_data <- sf_data |> filter(!`Checklists ID` %in% nachecklists)
+
+#sf_data <- sf_data |> filter(!is.na(`Observation Count`))
+
+# Conver abundance to 0 and 1s.
+sf_data$`Observation Count` <- ifelse(sf_data$`Observation Count` > 0, 1, 0)
+
+# Remove data with env variables NAs
+sf_data <- sf_data |> filter(!is.na(HMI))
+
+# Keep only point within 300 m from the centroid
+sf_data <- sf_data %>% filter(dist2Cen <= 300)
+
+# Keep only years 2018,2019,2022, and 2023
+sf_data <- sf_data %>% filter(Year %in% c(2018,2019,2022,2023))
+```
+
+# Estimate naïve occupancy for all species
+
+```{r, message=FALSE, warning=FALSE}
+# Filter repeat visits
+X <- round(st_coordinates(sf_data)[,1],0) #|> substr(1,4)
+Y <- round(st_coordinates(sf_data)[,2],0) #|> substr(1,5)
+
+# Coordinate variable to use create observation histories
+sf_data$coords <- paste0(X,"_",Y) 
+
+# Create observation histories for all species
+sf_data <- st_drop_geometry(sf_data)
+sf_data$CellID <- sprintf("%05d", as.numeric(sf_data$CellID))
+splist <- list()
+for(s in 1:length(speciesnamesfull)){
+  data <- sf_data |> filter(`Scientific Name` == speciesnamesfull[s])
+  occ <- filter_repeat_visits(data,
+                              min_obs = 1,
+                              max_obs = 4,
+                              annual_closure = T,
+                              date_var = "Observation Date",
+                              site_var = c("coords"))
+  
+  # prepare data for occupancy
+  occ_wide <- format_unmarked_occu(occ,
+                                   site_id = "site",
+                                   response = "Observation Count",
+                                   site_covs = c("CellID","Year"),
+                                   obs_covs = c("Effort Min")
+  )
+  occ_wide$SiteID <- substring(occ_wide$site, 1, nchar(occ_wide$site)-5)
+  occ_wide$Species <- speciesnamesfull[s]
+  splist[[s]] <- occ_wide
+}
+
+# Set basic parameters
+occData <- splist[[1]] |> slice_head(by = "CellID", n = 1) #Extract all sites sampled each year
+nsites <- length(unique(occData$CellID)) # N sites
+sites <- unique(occData$CellID) # site IDs
+year <- as.numeric(as.factor(occ_wide$Year)) 
+nsitespy <- as.vector(summary(as.factor(year))) # nr of samples per year
+years <- sort(unique(occData$Year)) # year
+nyears <- length(years) # N years
+nreps <- 4 # N reps
+nspecies <- length(speciesnamesfull) # N species
+
+visithist <- matrix(NA, nrow(occData), ncol = 1) #Dataframe with max num of secondary surveys per cell
+visithist[,1] <- rowSums(!is.na(occData[,2:5]))
+hist(visithist, main = "Number of visits per cell")
+
+# Save obs in an array (nsites x nreps x nyears x nspecies)
+# Obs
+Y <- array(NA, dim = c(nsites,nreps,nyears,nspecies))
+for(s in 1:nspecies){
+  temp1 <- splist[[s]] #filter(splist, Species == speciesnames[s])
+  for(i in 1:nyears){
+     temp2 <- filter(temp1, Year == years[i])[,c(2:6)]
+     temp3 <- temp2 |> slice_head(by = "CellID", n = 1) # Keep only one location per cell
+     W <- data.frame(CellID = sites)
+     J <- left_join(W, temp3, by = c("CellID"))
+     Y[,,i,s] <- as.matrix(J[,2:5])
+  } #y
+} #s
+
+# Calculate naive occ per species
+Naiveocc <- data.frame()
+for(s in 1:nspecies){
+  x <- Y[,,,s]
+  for(t in 1:nyears){
+    x1 <- data.frame(x[,,t])
+    x2 <- x1 |> drop_na(X1)
+    sum1<-apply(x2, 1, sum,na.rm=TRUE)
+    sum2<-ifelse(sum1 > 0, 1, 0)
+    sum3<-sum(sum2)
+    temp2<- data.frame(y = sum3/length(sum2), Species = speciesnamesfull[s], Year = years[t])
+    Naiveocc <- rbind(Naiveocc, temp2)
+  }
+}
+
+(speciesnavocc <- Naiveocc %>% group_by(Species) %>% summarise(Mean = mean(y)) %>% as.data.frame())
+speciesnames <- filter(speciesnavocc, Mean >= 0.2) 
+speciesnames <- speciesnames$Species
+```
+
+# Arrange data for modelling only for species >20% naïve occupancy
+
+```{r, message=FALSE, warning=FALSE}
+splist <- list()
+for(s in 1:length(speciesnames)){
+  data <- sf_data |> filter(`Scientific Name` == speciesnames[s])
+  occ <- filter_repeat_visits(data,
+                              min_obs = 1,
+                              max_obs = 4,
+                              annual_closure = T,
+                              date_var = "Observation Date",
+                              site_var = c("coords"))
+  
+  # prepare data for occupancy
+  occ_wide <- format_unmarked_occu(occ,
+                                   site_id = "site",
+                                   response = "Observation Count",
+                                   site_covs = c("CellID","Year","Elev","HMI","WoodVegCov","Agriculture"),
+                                   obs_covs = c("Effort Min", 
+                                                "Hours of Day",
+                                                "windspeed",
+                                                "ExpIndex")
+  )
+  occ_wide$SiteID <- substring(occ_wide$site, 1, nchar(occ_wide$site)-5)
+  occ_wide$Species <- speciesnamesfull[s]
+  splist[[s]] <- occ_wide
+}
+
+#Extract all sites sampled 
+occData <- splist[[1]] |> slice_head(by = "CellID", n = 1) 
+
+nspecies <- length(speciesnames) # N species
+
+# Save obs in an array (nsites x nreps x nyears x nspecies)
+# Obs
+Y <- array(NA, dim = c(nsites,nreps,nyears,nspecies))
+for(s in 1:nspecies){
+  temp1 <- splist[[s]] #filter(splist, Species == speciesnames[s])
+  for(i in 1:nyears){
+    temp2 <- filter(temp1, Year == years[i])[,c(2:6)]
+    temp3 <- temp2 |> slice_head(by = "CellID", n = 1) # Keep only one location per cell
+    W <- data.frame(CellID = sites)
+    J <- left_join(W, temp3, by = c("CellID"))
+    Y[,,i,s] <- as.matrix(J[,2:5])
+  } #y
+} #s
+
+# n visists per site per year
+nvisists <- matrix(NA,nsites,nyears)
+for(i in 1:nyears){
+    temp <- Y[,,i,1]
+    nvisists[,i] <- rowSums(!is.na(temp))
+  } #y
+
+# Number of sites visited per year
+nsitesvisits <- ifelse(nvisists > 0, 1, nvisists) # Set for loops in Bugs model
+apply(nsitesvisits, 2, sum)
+
+# Set indicator for loops in Bugs model
+nvisists <- ifelse(nvisists == 0, 1, nvisists) 
+```
+
+# Estandirize all covariables to mean zero and one unit standard deviation
+
+```{r, message=FALSE, warning=FALSE}
+# Environmental covariates
+envcovs <- occData %>% select(c("site", "Elev", "HMI", "WoodVegCov","Agriculture"))
+
+meanEle <- mean(envcovs$Elev, na.rm = T)
+sdEle <- sd(envcovs$Elev, na.rm = T)
+EleSc <- (envcovs$Elev - meanEle)/sdEle
+
+meanHMI <- mean(envcovs$HMI, na.rm = T)
+sdHMI <- sd(envcovs$HMI, na.rm = T)
+HMISc <- (envcovs$HMI - meanHMI)/sdHMI
+
+meanWoodVegCov <- mean(envcovs$WoodVegCov, na.rm = T)
+sdWoodVegCov <- sd(envcovs$WoodVegCov, na.rm = T)
+WoodVegCovSc <- (envcovs$WoodVegCov - meanWoodVegCov)/sdWoodVegCov
+
+meanAgriculture <- mean(envcovs$Agriculture, na.rm = T)
+sdAgriculture <- sd(envcovs$Agriculture, na.rm = T)
+AgrSc <- (envcovs$Agriculture - meanAgriculture)/sdAgriculture
+
+hist(EleSc)
+hist(HMISc)
+hist(WoodVegCovSc)
+hist(AgrSc)
+
+# Observation covariables
+
+EffortMin <- array(NA, dim = c(nsites,nreps,nyears))
+HoursofDay <- array(NA, dim = c(nsites,nreps,nyears))
+WindSpeed <- array(NA, dim = c(nsites,nreps,nyears))
+OEI <- array(NA, dim = c(nsites,nreps,nyears))
+
+for(i in 1:nyears){
+  temp1 <- filter(occData, Year == years[i])
+  W <- data.frame(CellID = sites)
+  J <- left_join(W, temp1, by = c("CellID"))
+  EffortMin[,,i]  <- as.matrix(J %>% select(contains("Effort Min")))
+  HoursofDay[,,i]  <- as.matrix(J %>% select(contains("Hours of Day")))
+  WindSpeed[,,i]  <- as.matrix(J %>% select(contains("windspeed")))
+  OEI[,,i]  <- as.matrix(J %>% select(contains("ExpIndex")))
+} 
+
+# Standardize variables
+meanEM <- mean(EffortMin, na.rm = T)
+sdEM <- sd(EffortMin, na.rm = T)
+EffortMinSc <- (EffortMin - meanEM)/sdEM
+
+meanHD <- mean(HoursofDay, na.rm = T)
+sdHD <- sd(HoursofDay, na.rm = T)
+HoursofDaySc <- (HoursofDay - meanHD)/sdHD
+
+meanWS <- mean(WindSpeed, na.rm = T)
+sdWS <- sd(WindSpeed, na.rm = T)
+WindSpeedSc <- (WindSpeed - meanWS)/sdWS
+
+meanOEI <- mean(OEI, na.rm = T)
+sdOEI <- sd(OEI, na.rm = T)
+OEISc <- (OEI - meanOEI)/sdOEI
+
+# Complete missing replicates with the mean 
+for(s in 1:nyears){
+  for(i in 1:nsites){
+    EffortMinSc[i,which(is.na(EffortMinSc[i,,s])==TRUE),s] = mean(EffortMinSc[,,s],na.rm = T)
+  }}
+
+for(s in 1:nyears){
+  for(i in 1:nsites){
+    HoursofDaySc[i,which(is.na(HoursofDaySc[i,,s])==TRUE),s] = mean(HoursofDaySc[,,s],na.rm = T)
+  }}
+
+for(s in 1:nyears){
+  for(i in 1:nsites){
+    WindSpeedSc[i,which(is.na(WindSpeedSc[i,,s])==TRUE),s] = mean(WindSpeedSc[,,s],na.rm = T)
+  }}
+
+for(s in 1:nyears){
+  for(i in 1:nsites){
+    OEISc[i,which(is.na(OEISc[i,,s])==TRUE),s] = mean(OEISc[,,s],na.rm = T)
+  }}
+
+save(Y, years, nyears, sites, nsites, nreps, nspecies, speciesnames, nvisists, nsitespy,
+     EffortMinSc, HoursofDaySc, WindSpeedSc, OEISc,
+     meanEM, meanHD, meanWS, meanOEI,
+     sdEM, sdHD, sdWS, sdOEI,
+     EleSc, HMISc, WoodVegCovSc, AgrSc,
+     meanEle, sdEle, meanHMI, sdHMI, meanWoodVegCov, sdWoodVegCov, meanAgriculture, sdAgriculture,
+     file = "./Data/occ_data15sp.RData")
+```
+
+# Plot sites per year
+
+```{r, message=FALSE, warning=FALSE}
+# Plot sites used per year
+Grid <- st_read("./Data/Grid.shp")
+Grid$CellID <- sprintf("%05d", as.numeric(Grid$CellID))
+
+formap <- left_join(splist[[1]], Grid, by = join_by("CellID" == "CellID")) 
+formap <- st_sf(formap, geometry = formap$geometry)
+formap$Nr_Visits <- rowSums(!is.na(formap[,2:5]))-1
+
+# Load Ireland shapefile
+Ireland <- st_read("./Shapefiles/Ireland.shp")
+library(heatmaply)
+(FigS1 <- tm_shape(Ireland) + tm_borders() +
+    tm_shape(formap) + tm_dots(fill = "Nr_Visits", size = 0.5, fill.scale = tm_scale(breaks = c(1,2,3,4,5), values = RdYlGn(4), labels = c("1","2","3","4")), fill.legend = tm_legend("Nr. of visits")) + tm_facets(by = "Year", nrow = 2, free.coords = FALSE))
+#tmap_save(FigS1, "./Figures/ChecklistsMap.jpg")
+
+# Number of repeated visists
+length(which(formap$Nr_Visits==1)) #412
+length(which(formap$Nr_Visits==2)) #74
+length(which(formap$Nr_Visits==3)) #30
+length(which(formap$Nr_Visits==4)) #72
+100-length(which(formap$Nr_Visits==1))*100/nrow(formap) #30%
+length(which(formap$Nr_Visits==2))+length(which(formap$Nr_Visits==3))+length(which(formap$Nr_Visits==4)) #176
+```

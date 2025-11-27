@@ -1,0 +1,231 @@
+# Summary of eBird data
+
+```{r, message=FALSE, warning=FALSE}
+# Load libraries 
+library(tidyverse)
+library(sf)
+library(terra)
+library(spatstat)
+library(ggpubr)
+library(tmap)
+library(pals) 
+library(rgee)
+
+# Clear environment
+rm(list = ls())
+
+# Laod filtered data
+load("./Data/filtered_data.RData")
+
+zf_filtered <- zf_filtered |> select(c(checklist_id, country, county, latitude, longitude, observation_date, time_observations_started, observer_id, protocol_type, effort_distance_km, number_observers, scientific_name, observation_count, effort_min, hours_of_day, day_of_year, year))
+
+names(zf_filtered) = c("Checklists ID","Country","County","Latitude","Longitude","Observation Date","Time Observations Started","Observer ID","Protocol Type","Effort Distance (km)","Number Observers","Scientific Name","Observation Count","Effort Min","Hours of Day","Day of Year","Year")
+
+# Delete observatiosn with NAs in observation count and keep only checklists from Jan 2023
+zf_filtered <- zf_filtered |> filter(!is.na(`Observation Count`)) |> filter(Year >= 2002)
+
+# Number of checklists submitted. 
+n_distinct(zf_filtered$`Checklists ID`) # Total
+
+zf_filtered %>% group_by(Country) |>  summarise(N = n_distinct(`Checklists ID`)) # Per country
+
+# Number of observers per country
+n_distinct(zf_filtered$`Observer ID`) # Total
+
+zf_filtered |>  group_by(Country) |>  summarise(N = n_distinct(`Observer ID`)) 
+
+# Nr of species
+length(unique(zf_filtered$`Scientific Name`)) # Total
+
+# Plot checklists per year
+checklists_per_year <- zf_filtered |>  group_by(Year) |>  summarise(N = n_distinct(`Checklists ID`)) 
+checklists_per_year$perc <- checklists_per_year$N/sum(checklists_per_year$N)*100
+
+# Percentage since 2018
+sum(filter(checklists_per_year, Year >= 2018)$perc) 
+
+# Histogram
+plot1 <- ggplot(checklists_per_year, aes(x = Year, y = N, fill = N)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Year", y = "Number of checklists") +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  scale_fill_gradient(low = "skyblue", high = "darkblue") +
+  theme_minimal() +
+  theme(
+    legend.position="none",
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8, color = "black"),
+    axis.text.y = element_text(size = 10, color = "black"),
+    axis.title = element_text(size = 11),
+    axis.line.x=element_blank(),
+    axis.ticks.y =element_blank(), 
+    axis.ticks.x =element_blank()
+  )
+
+# Number of observers per year
+observer_per_year <- zf_filtered |>  group_by(Year) |>  summarise(N = n_distinct(`Observer ID`)) 
+
+plot2 <- ggplot(observer_per_year, aes(x = Year, y = N, fill = N)) +
+    geom_bar(stat = "identity") +
+    labs(x = "Year", y = "Number of observers") +
+    geom_bar(stat = "identity", show.legend = FALSE) +
+    scale_fill_gradient(low = "skyblue", high = "darkblue") +
+    theme_minimal() +
+    theme(
+      legend.position="none",
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 8, color = "black"),
+      axis.text.y = element_text(size = 10, color = "black"),
+      axis.title = element_text(size = 11),
+      axis.line.x=element_blank(),
+      axis.ticks.y =element_blank(), 
+      axis.ticks.x =element_blank()
+    )
+
+# Mean checklists per month
+zf_filtered <- zf_filtered |>  mutate(month = format(as.Date(`Observation Date`), "%m"))
+monthly_checklists <- zf_filtered |>  group_by(Year, month) %>% summarise(N = n_distinct(`Checklists ID`))
+
+# Mean checklists per month
+plot3 <- ggplot(monthly_checklists, aes(x = month, y = N, group = Year, color = Year)) +
+  geom_line(linewidth = 1) +
+  scale_x_discrete(labels = month.abb) +
+  scale_colour_gradientn(colours = ocean.phase(22)) +
+  labs(x = "Month",
+       y = "Number of checklists") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 8),
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 11),
+    panel.grid.minor = element_blank()
+  )
+
+# Hours of day (full hour)
+zf_filtered <- zf_filtered |> 
+  mutate(hours_of_day = hour(hms(`Time Observations Started`)))
+
+# Mean checklists / hours of day
+hourly_checklists <- zf_filtered |> 
+  group_by(Year, hours_of_day) |> 
+  summarise(N = n_distinct(`Checklists ID`))
+
+# Checklist at hours of day
+plot4 <- ggplot(hourly_checklists, aes(x = hours_of_day, y = N, group = Year, color = Year)) +
+  geom_line(linewidth = 1) +
+  scale_x_continuous(breaks = seq(0, 23, by = 1)) +
+  scale_colour_gradientn(colours = ocean.phase(22)) +
+  labs(x = "Hour of day",
+       y = "Number of checklists") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 8),
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 11),
+  )
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Checklist per habitat type
+# Initialize rgee
+ee_Initialize()
+
+LC2006 <- ee$Image('COPERNICUS/CORINE/V20/100m/2006')
+LC2012 <- ee$Image('COPERNICUS/CORINE/V20/100m/2012')
+LC2018 <- ee$Image('COPERNICUS/CORINE/V20/100m/2018')
+
+checklists <- zf_filtered %>% group_by(`Checklists ID`) |>  slice_head(n = 1) |> select(c(Country, County, Latitude, Longitude, Year))
+checklists_sf <-  st_as_sf(checklists, coords = c("Longitude", "Latitude"), crs = 4326)
+
+checklists06 <- checklists_sf |> filter(Year %in% c(2003,2004,2005,2006,2007,2008,2009))
+checklists12 <- checklists_sf |> filter(Year %in% c(2010,2011,2012,2013,2014,2015))
+checklists18 <- checklists_sf |> filter(Year >= 2016)
+checklists18$uniq <- rep(1:1000, each=4000)[1:nrow(checklists18)] 
+
+# Extract land cover
+checkLC06 <- ee_extract(x=LC2006, y=checklists06, sf=F, scale = 100)
+checkLC12 <- ee_extract(x=LC2012, y=checklists12, sf=F, scale = 100)
+
+checkLC18 <- data.frame()
+for(i in 1:max(checklists18$uniq)){
+  data1 <- checklists18 %>% filter(uniq == i)
+  temp = ee_extract(x=LC2018, y=data1, sf=F, scale = 100)
+  # append
+  checkLC18 <- rbind(checkLC18, temp)
+}
+
+checklistLC <- rbind(checkLC06,checkLC12,checkLC18[,-5])
+
+# Reclassify land covers
+checklistLC <- checklistLC |> mutate(landcover = case_when(
+  landcover %in% c(111,112,121,122,123,124,131,132,133,141,142) ~ "Artificial surfaces",
+  landcover %in% c(211,212,213,221,222,223,231,241,242,243,244) ~ "Agricultural areas",
+  landcover %in% c(311,313,322,323,324) ~ "Woody vegetation",
+  landcover %in% c(312) ~ "Plantations",
+  landcover %in% c(321) ~ "Natural grasslands",
+  landcover %in% c(331,332,333,334,335) ~ "Bare soil",
+  landcover %in% c(411,412,421,422,423) ~ "Wetlands",
+  landcover %in% c(511,512) ~ "Water bodies",
+  landcover %in% c(521,522,523) ~ "Marine coastline"
+  ))
+checklistLC <- checklistLC |> filter(!is.na(landcover)) # Remove 17 sites with NAs
+```
+
+
+```{r, echo = F, message=FALSE, warning=FALSE}
+load("./Data/checklistLC.RData")
+```
+
+```{r, message=FALSE, warning=FALSE}
+checklistperLC <- checklistLC |>  group_by(landcover) |>  summarise(N = n())
+cols <- c("Artificial surfaces" = "#ffe6ff", "Agricultural areas" = "#e6e600", "Woody vegetation" = "#a6e64d", "Plantations" = "#00a600", "Natural grasslands" = "#ccf24d", "Bare soil" = "#e6e6e6", "Wetlands" = "#4d4dff", "Water bodies" = "#00ccf2", "Marine coastline" = "#a6ffe6")
+
+# Plot checklist per habitat type
+plot5 <- ggplot(checklistperLC, aes(x = landcover, y = N, fill = landcover)) +
+    geom_bar(stat = "identity") +
+    labs(x = "Land cover", y = "Number of checklists") +
+    geom_bar(stat = "identity", show.legend = FALSE) +
+    scale_fill_manual(values = cols, na.value = "grey50") +
+    theme_minimal() +
+    theme(
+      legend.position="none",
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 10, color = "black"),
+      axis.text.y = element_text(size = 10, color = "black"),
+      axis.title = element_text(size = 11),
+      axis.line.x=element_blank(),
+      axis.ticks.y =element_blank(), 
+      axis.ticks.x =element_blank()
+    )
+
+# Percentage per land cover
+total <- sum(checklistperLC$N)
+checklistperLC$percentage <- checklistperLC$N/total*100
+checklistperLC
+
+# Combine plots
+(Fig1 <- ggarrange(plot2, plot1, plot3, plot4, plot5, nrow=3, ncol=2, labels="AUTO", hjust = -6, vjust = 2))
+
+#ggsave(file = "./Figures/eBirdSummary.jpg", plot = Fig1, width = 10, height = 12)
+
+## Density of checklists across Ireland
+# Load Ireland shapefile
+Ireland <- st_read("./Shapefiles/Ireland.shp")
+checklists <- zf_filtered %>% group_by(`Checklists ID`) |>  slice_head(n = 1) |> select(c(Country, County, Latitude, Longitude, Year))
+checklists_sf <-  st_as_sf(checklists, coords = c("Longitude", "Latitude"), crs = 4326)
+# Calculate checklist desnity per 5km2
+r <- rast(Ireland, res=5000)
+cehcklistdens <- rasterize(checklists_sf, r, fun=function(i){length(i)}, background=NA)
+cehcklistdens
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Load cities shapefile
+cities <- read.csv("./Data/worldcities.csv")
+cities <- cities %>% filter(iso2 %in% c("IE","GB") & population > 20000) 
+cities_sf <- st_as_sf(cities, coords = c("lng", "lat"), crs = 4326)
+cities_sf <- st_transform(cities_sf, 32629)
+
+# Create map
+(Fig1F <- tm_shape(log(cehcklistdens)) + tm_raster(col.legend = tm_legend(expression(paste('log(Checklists 5 km'^-2,')'))), col.scale = tm_scale_continuous(values = viridis(10))) + tm_layout(frame = FALSE, legend.outside = F, legend.position = c("right","bottom"), legend.frame = F, legend.title.size = 1.2, legend.text.size = 1, legend.width = 10, legend.orientation = "landscape") + tm_shape(Ireland) + tm_borders() +
+tm_shape(cities_sf) +  tm_symbols(size = 0.7, lwd = 2, col = "black", fill = "red") + tm_logo("./Data/StudyArea.png", position=c("left", "top"), height = 9))
+
+#tmap_save(Fig1F, "./Figures/ChecklistDensity.jpg")
+```
